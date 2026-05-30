@@ -41,4 +41,15 @@ SUPABASE_TABLE = "products"
 
 # --- Request Settings ---
 REQUEST_TIMEOUT = 30
-REQUEST_DELAY = 1.0  # seconds between requests to be respectful
+REQUEST_DELAY = 1.0  # seconds between page requests to be respectful
+
+# --- Batch & Upsert Settings ---
+BATCH_SIZE = 50  # products per batch insert
+BATCH_RETRIES = 3  # retry attempts for failed batch inserts
+
+# --- Embedding Settings ---
+EMBEDDING_STAGGER_DELAY = 0.5  # seconds between HuggingFace API calls
+
+# --- Stale Product Cleanup ---
+# Products not seen for this many days (2 weekly runs) are auto-deleted
+STALE_DAYS_THRESHOLD = 14

@@ -2,14 +2,19 @@
 """
 Silverpair Product Scraper
 ===========================
-Full scraper that:
-1. Scrapes all products from silverpair.co
-2. Downloads product images
-3. Generates 768-dim image & text embeddings using google/siglip-base-patch16-384
-4. Inserts everything into Supabase products table
+Scrapes all products from silverpair.co, generates SigLIP 768-dim
+image & text embeddings, and imports them into Supabase.
+
+Features:
+  - Batch inserts (50 per batch) with automatic retry on failure
+  - Smart change detection — only re-processes products that actually changed
+  - Stale product cleanup — deletes products not seen for 2 consecutive runs
+  - Selective embedding generation — only for new or image-changed products
+  - Staggered embedding calls (0.5 s between calls)
+  - Comprehensive run summary (new / updated / unchanged / stale)
 
 Usage:
-    python scraper.py [--skip-embeddings] [--dry-run]
+    python scraper.py [--skip-embeddings] [--dry-run] [--product HANDLE]
 """
 
 import argparse
@@ -17,9 +22,8 @@ import json
 import logging
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
-
-from tqdm import tqdm
 
 import config
 from product_scraper import scrape_product, extract_product_urls
@@ -53,15 +57,67 @@ def parse_args():
         help="Scrape a single product by URL or handle (e.g., 'baggy-fit-jeans')",
     )
     parser.add_argument(
-        "--resume",
+        "--force",
         action="store_true",
-        help="Skip products that already exist in the database",
+        help="Force re-process all products (ignore change detection)",
     )
     return parser.parse_args()
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def format_timedelta(seconds: float) -> str:
+    """Format seconds into a human-readable duration string."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    mins = int(seconds // 60)
+    secs = int(seconds % 60)
+    return f"{mins}m {secs}s"
+
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+
+class RunSummary:
+    """Collects and prints a structured summary of the scraper run."""
+
+    def __init__(self):
+        self.new = 0
+        self.updated = 0
+        self.unchanged = 0
+        self.skipped_failed = 0
+        self.stale_deleted = 0
+        self.embeddings_generated = 0
+        self.start_time = time.time()
+
+    @property
+    def elapsed(self) -> str:
+        return format_timedelta(time.time() - self.start_time)
+
+    def print(self):
+        print()
+        logger.info("=" * 60)
+        logger.info("RUN COMPLETE — %s", self.elapsed)
+        logger.info("=" * 60)
+        logger.info(f"  New products:        {self.new}")
+        logger.info(f"  Updated products:    {self.updated}")
+        logger.info(f"  Unchanged (skipped): {self.unchanged}")
+        logger.info(f"  Failed:              {self.skipped_failed}")
+        logger.info(f"  Stale deleted:       {self.stale_deleted}")
+        logger.info(f"  Embeddings gen.:     {self.embeddings_generated}")
+        logger.info("=" * 60)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main():
     args = parse_args()
+    summary = RunSummary()
 
     logger.info("=" * 60)
     logger.info("Silverpair Product Scraper")
@@ -70,141 +126,201 @@ def main():
     logger.info(f"Brand: {config.BRAND_NAME}")
     logger.info("=" * 60)
 
-    # --- Step 1: Get product URLs ---
+    # ---- Step 1: Get product URLs -----------------------------------------
+
     if args.product:
         if args.product.startswith("http"):
             product_urls = [args.product]
         else:
             product_urls = [f"{config.BASE_URL}/products/{args.product}"]
-        logger.info(f"Scraping single product: {product_urls[0]}")
+        logger.info("Scraping single product: %s", product_urls[0])
     else:
         logger.info("Fetching product list from collections page...")
         product_urls = extract_product_urls()
-        logger.info(f"Found {len(product_urls)} products")
+        logger.info("Found %d products", len(product_urls))
 
     if not product_urls:
         logger.error("No products found. Exiting.")
         sys.exit(1)
 
-    # --- Step 2: Set up database connection ---
+    # ---- Step 2: Connect to database & fetch existing products -------------
+
     db = SupabaseClient()
-    existing_ids = set()
+    existing_products: dict[str, dict] = {}
+
     if not args.dry_run:
         try:
             db.connect()
-            if args.resume:
-                existing_ids = db.get_existing_product_ids()
-                logger.info(f"Found {len(existing_ids)} existing products in database")
+            existing_products = db.fetch_source_products()
         except Exception as e:
-            logger.error(f"Failed to connect to Supabase: {e}")
+            logger.error("Failed to connect to Supabase: %s", e)
             if not args.dry_run:
                 sys.exit(1)
 
-    # --- Step 3: Initialize embedder (if needed) ---
+    # ---- Step 3: Initialise embedder ---------------------------------------
+
     embedder = None
     if not args.skip_embeddings:
-        logger.info("Initializing SigLIP embedding model...")
+        logger.info("Initialising SigLIP embedding model...")
         try:
             from embeddings import SigLIPEmbedder
 
             embedder = SigLIPEmbedder()
             embedder.load_model()
         except Exception as e:
-            logger.error(f"Failed to load embedding model: {e}")
+            logger.error("Failed to load embedding model: %s", e)
             logger.warning("Continuing without embeddings...")
-            embedder = None
 
-    # --- Step 4: Scrape each product ---
-    results = {"success": 0, "skipped": 0, "failed": 0}
+    # ---- Step 4: Process each product --------------------------------------
+
+    batch_rows: list[dict] = []           # collected for DB insert
+    seen_product_urls: set[str] = set()   # tracks what we saw this run
 
     for i, url in enumerate(product_urls, 1):
         handle = url.split("/products/")[-1].split("?")[0]
-        product_id = f"silverpair-{handle}"
+        seen_product_urls.add(url)
 
-        # Skip if already exists (resume mode)
-        if args.resume and product_id in existing_ids:
-            logger.info(f"[{i}/{len(product_urls)}] Skipping (already exists): {handle}")
-            results["skipped"] += 1
-            continue
-
-        logger.info(f"[{i}/{len(product_urls)}] Scraping: {handle}")
+        # --- 4a. Scrape ----------------------------------------------------
+        logger.info("[%d/%d] Scraping: %s", i, len(product_urls), handle)
 
         try:
-            # Scrape the product
             product = scrape_product(url)
+        except Exception as e:
+            logger.error("  ✗ Failed to scrape %s: %s", handle, e)
+            summary.skipped_failed += 1
+            continue
 
-            if args.dry_run:
-                print(f"\n--- {product['title']} ---")
-                for key, value in product.items():
-                    if key == "info_text":
-                        continue
-                    if isinstance(value, str) and len(value) > 200:
-                        value = value[:200] + "..."
-                    print(f"  {key}: {value}")
-                results["success"] += 1
+        if args.dry_run:
+            print(f"\n--- {product['title']} ---")
+            for key, value in product.items():
+                if key == "info_text":
+                    continue
+                if isinstance(value, str) and len(value) > 200:
+                    value = value[:200] + "..."
+                print(f"  {key}: {value}")
+            summary.new += 1
+            continue
+
+        # --- 4b. Compare with existing -------------------------------------
+        existing = existing_products.get(url)
+
+        if existing and not args.force:
+            changed = db.compare_product_changed(product, existing)
+            if not changed:
+                logger.info("  → Unchanged (skip)")
+                summary.unchanged += 1
                 continue
+            else:
+                logger.info("  → Changes detected")
 
-            # Generate embeddings
-            image_embedding = None
-            info_embedding = None
+        is_new = existing is None
+        if is_new:
+            logger.info("  → New product")
 
-            if embedder and product.get("image_url"):
-                logger.info(f"  Generating image embedding...")
+        # --- 4c. Generate embeddings ---------------------------------------
+        image_embedding = None
+        info_embedding = None
+        needs_embedding = is_new
+
+        # Also regenerate if the image URL changed
+        if not needs_embedding and existing:
+            old_img = existing.get("image_url")
+            new_img = product.get("image_url")
+            if old_img != new_img:
+                logger.info("  → Image URL changed, re-generating embeddings")
+                needs_embedding = True
+
+        if needs_embedding and embedder and product.get("image_url"):
+            # Staggered call: small delay between *each* embedding gen
+            # (skip delay for the very first product)
+            if summary.embeddings_generated > 0:
+                time.sleep(config.EMBEDDING_STAGGER_DELAY)
+
+            logger.info("  Generating image embedding...")
+            try:
                 image_embedding = embedder.embed_image_from_url(product["image_url"])
                 if image_embedding:
-                    logger.info(f"  Image embedding: {len(image_embedding)} dims")
-                else:
-                    logger.warning(f"  Failed to generate image embedding")
+                    logger.info(
+                        "  Image embedding: %d dims", len(image_embedding)
+                    )
+            except Exception as e:
+                logger.warning("  Failed to generate image embedding: %s", e)
 
-            if embedder and product.get("info_text"):
-                logger.info(f"  Generating text embedding...")
+            if product.get("info_text"):
+                logger.info("  Generating text embedding...")
                 try:
                     info_embedding = embedder.embed_text(product["info_text"])
                     if info_embedding:
-                        logger.info(f"  Text embedding: {len(info_embedding)} dims")
+                        logger.info(
+                            "  Text embedding: %d dims", len(info_embedding)
+                        )
                 except Exception as e:
-                    logger.warning(f"  Failed to generate text embedding: {e}")
+                    logger.warning("  Failed to generate text embedding: %s", e)
 
-            # Insert into Supabase
-            success = db.upsert_product(
-                product,
-                image_embedding=image_embedding,
-                info_embedding=info_embedding,
-            )
+            summary.embeddings_generated += 1
 
-            if success:
-                results["success"] += 1
-                logger.info(f"  ✓ Imported: {product['title']}")
-            else:
-                results["failed"] += 1
-                logger.error(f"  ✗ Failed to import: {product['title']}")
+        # --- 4d. Build DB row and collect into batch -----------------------
+        row = db.build_db_row(
+            product,
+            image_embedding=image_embedding,
+            info_embedding=info_embedding,
+        )
+        batch_rows.append(row)
 
-        except Exception as e:
-            results["failed"] += 1
-            logger.error(f"  ✗ Error processing {handle}: {e}", exc_info=True)
+        if is_new:
+            summary.new += 1
+        else:
+            summary.updated += 1
 
-        # Be respectful with a small delay
+        # Flush batch when full
+        if len(batch_rows) >= config.BATCH_SIZE:
+            result = db.batch_upsert(batch_rows)
+            batch_rows = []
+            if result["failed"]:
+                summary.skipped_failed += len(result["failed"])
+
+        # Be respectful to the source website between page fetches
         if i < len(product_urls):
             time.sleep(config.REQUEST_DELAY)
 
-    # --- Summary ---
-    logger.info("=" * 60)
-    logger.info("SCRAPING COMPLETE")
-    logger.info(f"  Successful: {results['success']}")
-    logger.info(f"  Skipped:    {results['skipped']}")
-    logger.info(f"  Failed:     {results['failed']}")
-    logger.info("=" * 60)
+    # ---- Step 5: Flush remaining batch ------------------------------------
+    if batch_rows:
+        result = db.batch_upsert(batch_rows)
+        if result["failed"]:
+            summary.skipped_failed += len(result["failed"])
 
-    # Cleanup
+    # ---- Step 6: Clean up stale products ----------------------------------
+    if not args.dry_run and not args.product:
+        try:
+            summary.stale_deleted = db.delete_stale_products(seen_product_urls)
+        except Exception as e:
+            logger.error("Stale-product cleanup failed: %s", e)
+
+    # ---- Step 7: Print summary & save -------------------------------------
+    summary.print()
+
+    # Cleanup model memory
     if embedder:
         embedder.cleanup()
 
-    # Save results to file for reference
     if not args.dry_run:
         result_path = Path("scraper_results.json")
         with open(result_path, "w") as f:
-            json.dump(results, f, indent=2)
-        logger.info(f"Results saved to {result_path}")
+            json.dump(
+                {
+                    "new": summary.new,
+                    "updated": summary.updated,
+                    "unchanged": summary.unchanged,
+                    "failed": summary.skipped_failed,
+                    "stale_deleted": summary.stale_deleted,
+                    "embeddings_generated": summary.embeddings_generated,
+                    "elapsed": summary.elapsed,
+                    "run_timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+                f,
+                indent=2,
+            )
+        logger.info("Results saved to %s", result_path)
 
 
 if __name__ == "__main__":
