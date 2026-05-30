@@ -1,0 +1,61 @@
+name: Silverpair Scraper
+
+on:
+  # Run every Thursday at 12:00 UTC (14:00 CEST / 13:00 CET — Czech time)
+  schedule:
+    - cron: "0 12 * * 4"
+  # Allow manual trigger from GitHub UI
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.11"
+  # Override device to CPU for GitHub Actions runners (no GPU available)
+  DEVICE: cpu
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libxml2-dev libxslt-dev
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Cache the HuggingFace model to avoid re-downloading every week (~1.2 GB)
+      - name: Cache HuggingFace models
+        uses: actions/cache@v4
+        id: cache-hf
+        with:
+          path: ~/.cache/huggingface
+          key: hf-siglip-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Run scraper
+        run: python scraper.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          DEVICE: cpu
+
+      - name: Upload results artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scraper-results
+          path: scraper_results.json
+          retention-days: 30

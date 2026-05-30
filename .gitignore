@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project
+scraper_results.json
+
+# HuggingFace cache (downloaded models can be large)
+# Uncomment if you want to keep them out of version control:
+# ~/.cache/huggingface/
