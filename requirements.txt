@@ -10,6 +10,7 @@ torchvision>=0.16.0
 Pillow>=10.0.0
 accelerate>=0.25.0
 sentencepiece>=0.1.99
+protobuf>=4.25.0
 
 # Supabase
 supabase>=2.0.0
