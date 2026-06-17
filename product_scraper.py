@@ -295,7 +295,9 @@ def scrape_product(url: str) -> dict:
             unique_images.append(img)
     
     main_image = unique_images[0] if unique_images else ""
-    additional_images = " , ".join(unique_images[1:]) if len(unique_images) > 1 else None
+    # Second image is typically the back view (most common e-commerce convention)
+    back_image = unique_images[1] if len(unique_images) > 1 else None
+    additional_images = " , ".join(unique_images[2:]) if len(unique_images) > 2 else None
 
     # Gender - these are streetwear products, most are unisex
     gender = "unisex"
@@ -377,6 +379,7 @@ def scrape_product(url: str) -> dict:
         "product_url": url,
         "affiliate_url": None,
         "image_url": main_image,
+        "back_image_url": back_image,
         "brand": config.BRAND_NAME,
         "title": title,
         "description": description,

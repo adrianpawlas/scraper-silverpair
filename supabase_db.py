@@ -119,6 +119,7 @@ class SupabaseClient:
             "size",
             "tags",
             "image_url",
+            "back_image_url",
             "additional_images",
         ]
         for field in fields:
@@ -163,6 +164,7 @@ class SupabaseClient:
             "product_url": scraped["product_url"],
             "affiliate_url": scraped.get("affiliate_url"),
             "image_url": scraped["image_url"],
+            "back_image_url": scraped.get("back_image_url"),
             "brand": scraped["brand"],
             "title": scraped["title"],
             "description": scraped.get("description"),
@@ -177,7 +179,9 @@ class SupabaseClient:
             "tags": scraped.get("tags"),
             "created_at": now_iso,
             "image_embedding": image_embedding,
+            "back_image_embedding": scraped.get("back_image_embedding"),
             "info_embedding": info_embedding,
+            "embedding_version": scraped.get("embedding_version"),
         }
 
         # Strip keys whose value is None so Supabase uses DB defaults

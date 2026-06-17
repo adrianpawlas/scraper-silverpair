@@ -219,6 +219,7 @@ def main():
 
         # --- 4c. Generate embeddings ---------------------------------------
         image_embedding = None
+        back_image_embedding = None
         info_embedding = None
         needs_embedding = is_new
 
@@ -226,40 +227,71 @@ def main():
         if not needs_embedding and existing:
             old_img = existing.get("image_url")
             new_img = product.get("image_url")
+            old_back = existing.get("back_image_url")
+            new_back = product.get("back_image_url")
             if old_img != new_img:
-                logger.info("  → Image URL changed, re-generating embeddings")
+                logger.info("  → Front image URL changed, re-generating embeddings")
+                needs_embedding = True
+            elif old_back != new_back:
+                logger.info("  → Back image URL changed, re-generating embeddings")
                 needs_embedding = True
 
-        if needs_embedding and embedder and product.get("image_url"):
-            # Staggered call: small delay between *each* embedding gen
-            # (skip delay for the very first product)
-            if summary.embeddings_generated > 0:
+        if needs_embedding and embedder:
+            # ============== Front image embedding ==============
+            if product.get("image_url"):
+                # Staggered call: small delay between *each* embedding gen
+                # (skip delay for the very first product)
+                if summary.embeddings_generated > 0:
+                    time.sleep(config.EMBEDDING_STAGGER_DELAY)
+
+                logger.info("  Generating front image embedding...")
+                try:
+                    image_embedding = embedder.embed_image_from_url(product["image_url"])
+                    if image_embedding:
+                        logger.info(
+                            "  Front image embedding: %d dims ✓", len(image_embedding)
+                        )
+                        summary.embeddings_generated += 1
+                except Exception as e:
+                    logger.warning("  Failed to generate front image embedding: %s", e)
+
+            # ============== Back image embedding ===============
+            if product.get("back_image_url"):
                 time.sleep(config.EMBEDDING_STAGGER_DELAY)
 
-            logger.info("  Generating image embedding...")
-            try:
-                image_embedding = embedder.embed_image_from_url(product["image_url"])
-                if image_embedding:
-                    logger.info(
-                        "  Image embedding: %d dims", len(image_embedding)
-                    )
-            except Exception as e:
-                logger.warning("  Failed to generate image embedding: %s", e)
+                logger.info("  Generating back image embedding...")
+                try:
+                    back_image_embedding = embedder.embed_image_from_url(product["back_image_url"])
+                    if back_image_embedding:
+                        logger.info(
+                            "  Back image embedding: %d dims ✓", len(back_image_embedding)
+                        )
+                        summary.embeddings_generated += 1
+                except Exception as e:
+                    logger.warning("  Failed to generate back image embedding: %s", e)
 
+            # ============== Text embedding ====================
             if product.get("info_text"):
+                time.sleep(config.EMBEDDING_STAGGER_DELAY)
+
                 logger.info("  Generating text embedding...")
                 try:
                     info_embedding = embedder.embed_text(product["info_text"])
                     if info_embedding:
                         logger.info(
-                            "  Text embedding: %d dims", len(info_embedding)
+                            "  Text embedding: %d dims ✓", len(info_embedding)
                         )
+                        summary.embeddings_generated += 1
                 except Exception as e:
                     logger.warning("  Failed to generate text embedding: %s", e)
 
-            summary.embeddings_generated += 1
+            # Tag embeddings with current version (only set when actually generated)
+            product["embedding_version"] = config.EMBEDDING_VERSION
+            if back_image_embedding is not None:
+                product["back_image_embedding"] = back_image_embedding
 
         # --- 4d. Build DB row and collect into batch -----------------------
+
         row = db.build_db_row(
             product,
             image_embedding=image_embedding,

@@ -49,6 +49,7 @@ BATCH_RETRIES = 3  # retry attempts for failed batch inserts
 
 # --- Embedding Settings ---
 EMBEDDING_STAGGER_DELAY = 0.5  # seconds between HuggingFace API calls
+EMBEDDING_VERSION = 2  # current embedding version (incremented when pipeline changes)
 
 # --- Stale Product Cleanup ---
 # Products not seen for this many days (2 weekly runs) are auto-deleted
