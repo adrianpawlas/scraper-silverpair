@@ -206,6 +206,20 @@ def main():
 
         if existing and not args.force:
             changed = db.compare_product_changed(product, existing)
+
+            # Force re-process if the existing product has a stale (or missing)
+            # embedding version — this makes sure every product gets the new
+            # fields (back_image_url, back_image_embedding, embedding_version)
+            # when the embedding pipeline is updated.
+            if not changed:
+                existing_version = existing.get("embedding_version")
+                if existing_version is None or existing_version < config.EMBEDDING_VERSION:
+                    logger.info(
+                        "  → Stale embedding version (%s), re-processing",
+                        existing_version,
+                    )
+                    changed = True
+
             if not changed:
                 logger.info("  → Unchanged (skip)")
                 summary.unchanged += 1
@@ -223,7 +237,9 @@ def main():
         info_embedding = None
         needs_embedding = is_new
 
-        # Also regenerate if the image URL changed
+        # Also regenerate if the image URL changed, or if the embedding
+        # version is stale (ensures existing products get re-embedded when
+        # the pipeline is updated).
         if not needs_embedding and existing:
             old_img = existing.get("image_url")
             new_img = product.get("image_url")
@@ -235,6 +251,14 @@ def main():
             elif old_back != new_back:
                 logger.info("  → Back image URL changed, re-generating embeddings")
                 needs_embedding = True
+            else:
+                existing_version = existing.get("embedding_version")
+                if existing_version is None or existing_version < config.EMBEDDING_VERSION:
+                    logger.info(
+                        "  → Stale embedding version (%s), re-generating embeddings",
+                        existing_version,
+                    )
+                    needs_embedding = True
 
         if needs_embedding and embedder:
             # ============== Front image embedding ==============
