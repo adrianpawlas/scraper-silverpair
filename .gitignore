@@ -23,6 +23,7 @@ Thumbs.db
 
 # Project
 scraper_results.json
+failed_batch_inserts.jsonl
 
 # HuggingFace cache (downloaded models can be large)
 # Uncomment if you want to keep them out of version control:

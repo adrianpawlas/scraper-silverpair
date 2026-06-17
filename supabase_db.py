@@ -158,6 +158,12 @@ class SupabaseClient:
         now_iso = datetime.now(timezone.utc).isoformat()
         metadata["last_seen_at"] = now_iso
 
+        # Store embedding_version in metadata (not as a separate column)
+        # so we can track version bumps without altering the DB schema.
+        embedding_ver = scraped.get("embedding_version")
+        if embedding_ver is not None:
+            metadata["embedding_version"] = embedding_ver
+
         row = {
             "id": scraped["id"],
             "source": scraped["source"],
@@ -181,7 +187,6 @@ class SupabaseClient:
             "image_embedding": image_embedding,
             "back_image_embedding": scraped.get("back_image_embedding"),
             "info_embedding": info_embedding,
-            "embedding_version": scraped.get("embedding_version"),
         }
 
         # Strip keys whose value is None so Supabase uses DB defaults

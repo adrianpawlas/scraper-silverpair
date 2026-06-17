@@ -208,11 +208,12 @@ def main():
             changed = db.compare_product_changed(product, existing)
 
             # Force re-process if the existing product has a stale (or missing)
-            # embedding version — this makes sure every product gets the new
-            # fields (back_image_url, back_image_embedding, embedding_version)
-            # when the embedding pipeline is updated.
+            # embedding version (stored in metadata) — this makes sure every
+            # product gets the new fields (back_image_url, back_image_embedding,
+            # embedding_version) when the embedding pipeline is updated.
             if not changed:
-                existing_version = existing.get("embedding_version")
+                existing_meta = existing.get("_parsed_metadata", {})
+                existing_version = existing_meta.get("embedding_version")
                 if existing_version is None or existing_version < config.EMBEDDING_VERSION:
                     logger.info(
                         "  → Stale embedding version (%s), re-processing",
@@ -252,7 +253,8 @@ def main():
                 logger.info("  → Back image URL changed, re-generating embeddings")
                 needs_embedding = True
             else:
-                existing_version = existing.get("embedding_version")
+                existing_meta = existing.get("_parsed_metadata", {})
+                existing_version = existing_meta.get("embedding_version")
                 if existing_version is None or existing_version < config.EMBEDDING_VERSION:
                     logger.info(
                         "  → Stale embedding version (%s), re-generating embeddings",
